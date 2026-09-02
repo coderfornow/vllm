@@ -193,6 +193,7 @@ def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
     for expected in (
         "requirements/common.txt",
         "requirements/rocm.txt",
+        "requirements/rocm-ci.txt",
         "requirements/test/rocm.txt",
         "docker/Dockerfile.rocm",
     ):

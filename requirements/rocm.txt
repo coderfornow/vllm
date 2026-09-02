@@ -27,3 +27,17 @@ tilelang==0.1.10
 apache-tvm-ffi==0.1.10 
 # Required for faster safetensors model loading
 fastsafetensors >= 0.3.3
+
+# MoRI proxy runtime dependencies (mori_base consumes the resolved ROCm lock).
+blinker
+quart
+msgpack
+aiohttp
+pyzmq
+
+# Runtime metadata of the pinned AITER wheel built in Dockerfile.rocm_base.
+flydsl==0.2.4
+pybind11>=3.0.1
+
+# Optional TorchAudio runtime used by the source-built wheel.
+soundfile

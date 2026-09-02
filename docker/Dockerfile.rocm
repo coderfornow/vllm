@@ -24,11 +24,15 @@ ARG NIC_BACKEND=all
 # The default version has been tested with ioinic-dkms=25.11.1.001
 ARG AINIC_VERSION=1.117.3-hydra
 ARG UBUNTU_CODENAME=jammy
+ARG AMD_ROCM_GPG_KEY_SHA256=2de99e2354646a90d9903e2a669fc4e36b02c1bbff7075c481e12d7edab2c88b
+ARG BROADCOM_GPG_KEY_SHA256=8cacd110fad176c3ccb08f3f3ddcbc8500c6a982ba63a4948b05830bd8b6fa20
 
 # Sccache configuration. Release builds use this today; CI can opt in when a
 # shared S3-compatible cache backend is available.
 ARG USE_SCCACHE
 ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_VERSION=v0.8.1
+ARG SCCACHE_DOWNLOAD_SHA256=e0ee621fb16b6940666cd770b091c62cadafd3e062dd12e3a49d9caaff3b795f
 ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
@@ -45,7 +49,7 @@ RUN apt-get update -q -y && apt-get install -q -y \
     apt-transport-https ca-certificates wget curl \
     libnuma-dev ccache mold
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --upgrade pip
+    python3 -m pip install --upgrade pip==26.2.1
 # Note: mold is installed but not set as the system default linker because
 # some packages use JIT compilation at runtime with flags mold does not support.
 # Build stages opt in via LDFLAGS="-fuse-ld=mold".
@@ -57,11 +61,21 @@ RUN if [ "$USE_SCCACHE" != "1" ]; then \
         rm -f "$(which sccache)" || true; \
     fi
 
-# Install UV — download first, then run, so a curl failure is not masked by the pipe
-RUN curl -LsSf --retry 3 --retry-delay 5 https://astral.sh/uv/install.sh -o /tmp/uv-install.sh \
-    && env UV_INSTALL_DIR="/usr/local/bin" sh /tmp/uv-install.sh \
-    && rm -f /tmp/uv-install.sh \
-    && uv --version
+# Install a checksum-pinned x86_64 uv release.
+ARG UV_VERSION=0.12.1
+ARG UV_DOWNLOAD_SHA256=90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb
+RUN if ! command -v uv >/dev/null 2>&1 \
+        || [ "$(uv --version | awk '{print $2}')" != "${UV_VERSION}" ]; then \
+        curl -fLsS --retry 3 --retry-delay 5 \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" \
+            -o /tmp/uv.tar.gz \
+        && printf '%s  %s\n' "${UV_DOWNLOAD_SHA256}" /tmp/uv.tar.gz | sha256sum --check - \
+        && mkdir -p /tmp/uv \
+        && tar -xzf /tmp/uv.tar.gz -C /tmp/uv --strip-components=1 \
+        && install -m 0755 /tmp/uv/uv /tmp/uv/uvx /usr/local/bin/ \
+        && rm -rf /tmp/uv /tmp/uv.tar.gz; \
+    fi \
+    && test "$(uv --version | awk '{print $2}')" = "${UV_VERSION}"
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -79,6 +93,8 @@ ENV MAX_JOBS=${max_jobs}
 # Install sccache if USE_SCCACHE is enabled (for release builds)
 ARG USE_SCCACHE
 ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_VERSION
+ARG SCCACHE_DOWNLOAD_SHA256
 ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME
 ARG SCCACHE_REGION_NAME
@@ -90,9 +106,9 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         else \
             echo "Installing sccache..." \
             && SCCACHE_ARCH="x86_64" \
-            && SCCACHE_VERSION="v0.8.1" \
             && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
-            && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+            && curl -fL --retry 3 --retry-delay 5 -o /tmp/sccache.tar.gz "${SCCACHE_DL_URL}" \
+            && printf '%s  %s\n' "${SCCACHE_DOWNLOAD_SHA256}" /tmp/sccache.tar.gz | sha256sum --check - \
             && tar -xzf /tmp/sccache.tar.gz -C /tmp \
             && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
             && chmod +x /usr/bin/sccache \
@@ -136,7 +152,7 @@ FROM fetch_vllm AS vllm-version
 ARG COMMON_WORKDIR
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     cd ${COMMON_WORKDIR}/vllm \
-    && uv pip install --system -r requirements/build/rust.txt \
+    && uv pip install --system --no-deps -r requirements/build/rust.txt \
     && python3 -c \
         "from setuptools_scm import get_version; print(get_version())" \
         > /vllm-version.txt
@@ -203,6 +219,8 @@ FROM base AS rust-toolchain
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH=${CARGO_HOME}/bin:${PATH}
+ARG RUSTUP_VERSION=1.29.0
+ARG RUSTUP_INIT_SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
 
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
         ca-certificates curl \
@@ -211,9 +229,15 @@ RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
 COPY --from=rust-toolchain-input /rust-toolchain-input/vllm/rust-toolchain.toml /tmp/rust-toolchain.toml
 RUN TOOLCHAIN="$(grep '^channel' /tmp/rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')" \
     && if ! command -v rustup >/dev/null 2>&1; then \
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --default-toolchain none; \
+        curl --proto '=https' --tlsv1.2 -fLsS --retry 3 --retry-delay 5 \
+            "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+            -o /tmp/rustup-init \
+        && printf '%s  %s\n' "${RUSTUP_INIT_SHA256}" /tmp/rustup-init | sha256sum --check - \
+        && chmod +x /tmp/rustup-init \
+        && /tmp/rustup-init -y --default-toolchain none \
+        && rm -f /tmp/rustup-init; \
     fi \
+    && test "$(rustup --version | sed -n '1s/^rustup \([^ ]*\).*/\1/p')" = "${RUSTUP_VERSION}" \
     && rustup toolchain install "${TOOLCHAIN}" \
     && rustup default "${TOOLCHAIN}" \
     && rustc --version \
@@ -242,7 +266,7 @@ COPY --from=rust-input /rust-input/vllm/requirements/build/rust.txt requirements
 ENV SCCACHE_SERVER_PORT=4227
 
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    uv pip install --system -r requirements/build/rust.txt
+    uv pip install --system --no-deps -r requirements/build/rust.txt
 
 COPY --from=rust-input /rust-input/vllm/rust rust
 COPY --from=rust-input /rust-input/vllm/rust-toolchain.toml rust-toolchain.toml
@@ -279,18 +303,25 @@ ENV VLLM_TARGET_DEVICE=rocm
 WORKDIR ${COMMON_WORKDIR}/vllm
 
 COPY --from=fetch_vllm \
-    ${COMMON_WORKDIR}/vllm/requirements/common.txt \
-    ${COMMON_WORKDIR}/vllm/requirements/rocm.txt \
+    ${COMMON_WORKDIR}/vllm/requirements/rocm-ci.txt \
     requirements/
 
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    uv pip install --system -r requirements/rocm.txt
+    uv pip install --system --no-deps -r requirements/rocm-ci.txt
+
+# setup.py reads these source requirements when generating wheel metadata; all
+# packages are still installed exclusively from the resolved lock above.
+COPY --from=fetch_vllm \
+    ${COMMON_WORKDIR}/vllm/requirements/common.txt \
+    ${COMMON_WORKDIR}/vllm/requirements/rocm.txt \
+    requirements/
 
 # Fetch only the pinned ROCm Triton kernels package. Keeping this before the
 # vLLM source COPYs makes the download reusable when native sources change.
 FROM base AS rocm-triton-kernels
 ARG ROCM_TRITON_KERNELS_COMMIT
-ADD https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
+ADD --checksum=sha256:3bf25681b3e22ce9eb8160e5161fc3d18a6a58e7c9c1ac806d55dc0b786ed3b3 \
+    https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
     /tmp/rocm-triton.tar.gz
 RUN mkdir -p /opt/rocm-triton-kernels \
     && tar --extract --gzip --file /tmp/rocm-triton.tar.gz \
@@ -412,14 +443,18 @@ RUN apt-get -y update && apt-get -y install autoconf libtool pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system meson meson-python pyyaml types-PyYAML \
-        auditwheel build patchelf pytest tomlkit "setuptools>=80.9.0"
+    uv pip install --system \
+        meson==1.12.0 meson-python==0.20.0 pyyaml==6.0.3 \
+        types-PyYAML==6.0.12.20260815 auditwheel==6.8.2 build==1.6.0 \
+        patchelf==0.19.1.0 pytest==9.1.1 tomlkit==0.15.1 \
+        setuptools==84.0.0
 
 RUN --mount=type=cache,target=/root/.cache/ccache \
     cd /usr/local/src && \
     git clone ${UCX_REPO} &&  \
     cd ucx  && \
-    git checkout ${UCX_BRANCH} && \
+    git checkout --detach ${UCX_BRANCH} && \
+    test "$(git rev-parse HEAD)" = "${UCX_BRANCH}" && \
     ./autogen.sh && \
     mkdir build && cd build && \
     CC="ccache gcc" CXX="ccache g++" \
@@ -443,7 +478,8 @@ ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
 RUN --mount=type=cache,target=/root/.cache/ccache \
     git clone ${NIXL_REPO} /opt/nixl && \
     cd /opt/nixl && \
-    git checkout ${NIXL_BRANCH} && \
+    git checkout --detach ${NIXL_BRANCH} && \
+    test "$(git rev-parse HEAD)" = "${NIXL_BRANCH}" && \
     CC="ccache gcc" CXX="ccache g++" \
     meson setup build --prefix=${NIXL_HOME} \
                      -Ducx_path=${UCX_HOME} \
@@ -508,10 +544,9 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
     && rm -rf /app/lmcache/.git
 
 FROM base AS build_lmcache
-COPY --from=lmcache_source \
-    /app/lmcache/requirements/build.txt /tmp/lmcache-build-requirements.txt
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/lmcache-build-requirements.txt
+    uv pip install --system --no-deps ninja==1.13.2 packaging==26.3 \
+        setuptools==79.0.1 setuptools-scm==10.2.1 wheel==0.48.0
 
 ARG LMCACHE_VERSION="0.5.3"
 ARG LMCACHE_ROCM_ARCH="gfx942;gfx950"
@@ -554,7 +589,7 @@ RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
 # ROCShmem build stage - split from DeepEP so changing DEEPEP_BRANCH does not
 # invalidate the slow ROCShmem build.
 FROM base AS build_rocshmem
-ARG ROCSHMEM_BRANCH="f0acb0c6"
+ARG ROCSHMEM_BRANCH="f0acb0c6e815c2ae951fcc50612b3f2ae835f87d"
 ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
 # DeepEP only supports gfx942 and gfx950; build ROCShmem for the same set so
 # it can be linked against DeepEP without arch mismatches.
@@ -566,7 +601,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     git clone --no-checkout --filter=blob:none ${ROCSHMEM_REPO} \
  && cd rocm-systems \
  && git sparse-checkout set --cone projects/rocshmem \
- && git checkout ${ROCSHMEM_BRANCH} \
+ && git checkout --detach ${ROCSHMEM_BRANCH} \
+ && test "$(git rev-parse HEAD)" = "${ROCSHMEM_BRANCH}" \
  && mkdir -p projects/rocshmem/build \
  && cd projects/rocshmem/build \
  && CC="ccache gcc" CXX="ccache g++" INSTALL_PREFIX=${ROCSHMEM_DIR} \
@@ -577,7 +613,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 
 # DeepEP build stage - depends on ROCShmem, builds the HIP kernel wheel.
 FROM build_rocshmem AS build_deepep
-ARG DEEPEP_BRANCH="0f63d3e9"
+ARG DEEPEP_BRANCH="0f63d3e97f0e43b47926179d7f3f304b3bc9554e"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
 ARG DEEPEP_NIC="cx7"
 
@@ -587,10 +623,11 @@ ARG DEEPEP_NIC="cx7"
 # quantization bound with vLLM's own clamp
 # (vllm/model_executor/layers/quantization/utils/fp8_utils.py): 224 for E4M3FNUZ
 RUN --mount=type=cache,target=/root/.cache/ccache \
-    export PYTORCH_ROCM_ARCH="gfx942;gfx950" \
+    export PYTORCH_ROCM_ARCH="${DEEPEP_ROCM_ARCH}" \
  && git clone ${DEEPEP_REPO} \
  && cd DeepEP \
- && git checkout ${DEEPEP_BRANCH} \
+ && git checkout --detach ${DEEPEP_BRANCH} \
+ && test "$(git rev-parse HEAD)" = "${DEEPEP_BRANCH}" \
  && LDFLAGS="-fuse-ld=mold" MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py --variant rocm --rocm-explicit-ctx --nic ${DEEPEP_NIC} --rocm-gfx942-fp8-fnuz-max 224 bdist_wheel --dist-dir=/app/deep_install
 
 # MoRI runtime dependencies live in Dockerfile.rocm so NIC backend changes do
@@ -599,13 +636,18 @@ FROM base AS mori_base
 ARG NIC_BACKEND
 ARG AINIC_VERSION
 ARG UBUNTU_CODENAME
+ARG AMD_ROCM_GPG_KEY_SHA256
+ARG BROADCOM_GPG_KEY_SHA256
 RUN /bin/bash -lc 'set -euo pipefail; \
  \
  install_ainic() { \
    apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg apt-transport-https; \
    rm -rf /var/lib/apt/lists/*; \
    mkdir -p /etc/apt/keyrings; \
-   curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/amdainic.gpg; \
+   curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key -o /tmp/rocm.gpg.key; \
+   printf "%s  %s\n" "${AMD_ROCM_GPG_KEY_SHA256}" /tmp/rocm.gpg.key | sha256sum --check -; \
+   gpg --dearmor < /tmp/rocm.gpg.key > /etc/apt/keyrings/amdainic.gpg; \
+   rm -f /tmp/rocm.gpg.key; \
    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amdainic.gpg] https://repo.radeon.com/amdainic/pensando/ubuntu/${AINIC_VERSION} ${UBUNTU_CODENAME} main" \
      > /etc/apt/sources.list.d/amdainic.list; \
    apt-get update && apt-get install -y --no-install-recommends \
@@ -621,6 +663,7 @@ RUN /bin/bash -lc 'set -euo pipefail; \
    install -m 0755 -d /etc/apt/keyrings; \
    curl -fsSL https://packages.broadcom.com/artifactory/api/security/keypair/PackagesKey/public \
      -o /etc/apt/keyrings/broadcom-nic.asc; \
+   printf "%s  %s\n" "${BROADCOM_GPG_KEY_SHA256}" /etc/apt/keyrings/broadcom-nic.asc | sha256sum --check -; \
    chmod a+r /etc/apt/keyrings/broadcom-nic.asc; \
    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/broadcom-nic.asc] https://packages.broadcom.com/artifactory/ethernet-nic-debian-public jammy main" \
      > /etc/apt/sources.list.d/broadcom-nic.list; \
@@ -632,9 +675,7 @@ RUN /bin/bash -lc 'set -euo pipefail; \
    rm -rf /var/lib/apt/lists/*; \
  }; \
  \
- echo "[MORI] Install MoRI proxy deps"; \
- pip install --quiet --ignore-installed blinker && \
- pip install --quiet quart msgpack aiohttp pyzmq; \
+ echo "[MORI] Proxy deps come from the resolved ROCm base lock"; \
  echo "[MORI] NIC_BACKEND=${NIC_BACKEND}"; \
  \
  # NIC backend deps — mori auto-detects NIC at runtime (MORI_DEVICE_NIC env var override). \
@@ -774,7 +815,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     grep -Fq "set(TRITON_KERNELS_TAG \"${ROCM_TRITON_KERNELS_COMMIT}\")" \
         vllm/cmake/external_projects/triton_kernels.cmake \
     && cd vllm \
-    && uv pip install --system setuptools_scm regex
+    && uv pip install --system --no-deps setuptools_scm==10.2.1 regex==2026.9.3
 
 # Fail if git-based package dependencies are found in requirements files
 # (uv doesn't handle git+ URLs well, and packages should be distributed on PyPI)
@@ -810,7 +851,9 @@ RUN echo "Pinning vLLM dependencies to custom wheel versions..." \
 RUN --mount=type=cache,target=/root/.cache/uv \
     cd vllm \
     && echo "Building vLLM with custom wheels from /install" \
-    && uv pip install --system --find-links /install -r requirements/rocm.txt
+    && uv pip install --system --no-deps -r requirements/rocm-ci.txt \
+    && uv pip install --system --no-deps /install/*.whl \
+    && uv pip check --system
 
 # Build wheel using the shared source version to avoid dirty state from modified requirements/rocm.txt
 # (setup.py auto-detects ccache/sccache in PATH)
@@ -860,9 +903,14 @@ COPY --from=rust-toolchain /root/.cargo /root/.cargo
 COPY --from=rust-toolchain /root/.rustup /root/.rustup
 
 # Update rdma-core to support latest rocshmem.
-ARG DEEPEP_NIC
+ARG DEEPEP_NIC=cx7
+ARG RDMA_CORE_COMMIT=31af04ec84378724cb6256814d4ffde359a7123b
 RUN if [ "${DEEPEP_NIC}" = "cx7" ] || [ "${DEEPEP_NIC}" = "io" ]; then \
-    git clone --branch v62.0 --depth 1 https://github.com/linux-rdma/rdma-core.git /tmp/rdma-core && \
+    git init -q /tmp/rdma-core && \
+    git -C /tmp/rdma-core remote add origin https://github.com/linux-rdma/rdma-core.git && \
+    git -C /tmp/rdma-core fetch --depth 1 origin "${RDMA_CORE_COMMIT}" && \
+    git -C /tmp/rdma-core checkout -q --detach FETCH_HEAD && \
+    test "$(git -C /tmp/rdma-core rev-parse HEAD)" = "${RDMA_CORE_COMMIT}" && \
     cd /tmp/rdma-core && \
     mkdir -p build && cd build && \
     cmake -GNinja -DCMAKE_INSTALL_PREFIX=/usr -DNO_MAN_PAGES=1 .. && \
@@ -872,7 +920,7 @@ fi
 # Install NIXL + DeepEP wheels.
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
-    uv pip install --system /nixl_install/*.whl /deep_install/*.whl
+    uv pip install --system --no-deps /nixl_install/*.whl /deep_install/*.whl
 
 # Copy ROCShmem runtime libraries.
 COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
@@ -898,12 +946,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && rm /tmp/install_torchcodec.sh \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Pre-install shared ROCm runtime dependencies.
-COPY requirements/common.txt requirements/rocm.txt /tmp/ci-base-requirements/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/ci-base-requirements/rocm.txt \
-    && rm -rf /tmp/ci-base-requirements
-
 # Enable fast and less brittle model downloads in tests.
 ENV HF_XET_HIGH_PERFORMANCE=1
 ENV HF_HUB_DOWNLOAD_TIMEOUT=60
@@ -914,7 +956,7 @@ ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
 # Pre-install vLLM test dependencies.
 COPY requirements/test/rocm.txt /tmp/rocm-test-reqs.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/rocm-test-reqs.txt
+    uv pip install --system --no-deps -r /tmp/rocm-test-reqs.txt
 
 # Rebuild fastsafetensors from source so its C++ extension is compiled with
 # USE_ROCM and can detect libamdhip64.so at runtime.
@@ -943,15 +985,14 @@ ENV KINETO_CONFIG="${COMMON_WORKDIR}/libkineto.conf"
 # Install vllm_test_utils in ci_base for ci_base + wheel parity.
 COPY tests/vllm_test_utils /tmp/vllm_test_utils
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system /tmp/vllm_test_utils \
+    uv pip install --system --no-deps /tmp/vllm_test_utils \
     && rm -rf /tmp/vllm_test_utils
 
 RUN --mount=type=bind,from=build_lmcache,src=/app/install,target=/lmcache_install \
-    --mount=type=bind,source=requirements/test/rocm.txt,target=/tmp/lmcache-constraints.txt \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --constraint /tmp/lmcache-constraints.txt \
-        /lmcache_install/*.whl \
-    && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
+    uv pip install --system --no-deps /lmcache_install/*.whl \
+    && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)" \
+    && uv pip check --system
 
 RUN --mount=type=bind,from=export_mooncake,src=/,target=/mooncake_install,ro \
     --mount=type=cache,target=/root/.cache/uv \
@@ -1003,7 +1044,7 @@ COPY --from=test_smoke /vllm-smoke-ok /
 # Final vLLM image
 FROM mori_base AS final_common
 
-RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --upgrade pip==26.2.1 && rm -rf /var/lib/apt/lists/*
 
 # Clean up sccache from release image (not needed at runtime)
 # This removes the binary and wrappers that may have been installed during build
@@ -1025,21 +1066,19 @@ RUN case "$(which python3)" in \
             rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/;; \
         *) ;; esac
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --upgrade huggingface-hub[cli]
-
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system -r requirements/rocm.txt \
+    && uv pip install --system --no-deps -r requirements/rocm-ci.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
+    && uv pip install --system --no-deps *.whl
 
 # Install NIXL ROCm wheel
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
-    uv pip install --system /nixl_install/*.whl
+    uv pip install --system --no-deps /nixl_install/*.whl \
+    && uv pip check --system
 
 RUN --mount=type=bind,from=export_mooncake,src=/,target=/mooncake_install,ro \
     --mount=type=cache,target=/root/.cache/uv \
@@ -1093,9 +1132,11 @@ CMD ["/bin/bash"]
 FROM final_common AS final_lmcache_false
 
 FROM final_common AS final_lmcache_true
-RUN --mount=type=bind,from=build_lmcache,src=/app/install,target=/lmcache_install \
+RUN --mount=type=bind,from=export_vllm,src=/requirements/rocm-lmcache.txt,target=/tmp/rocm-lmcache.txt \
+    --mount=type=bind,from=build_lmcache,src=/app/install,target=/lmcache_install \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system /lmcache_install/*.whl \
+    uv pip install --system --no-deps -r /tmp/rocm-lmcache.txt \
+    && uv pip install --system --no-deps /lmcache_install/*.whl \
     && test "$(python3 -c 'import numpy; print(numpy.__version__)')" = "2.3.5" \
     && uv pip check --system \
     && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"

@@ -9,18 +9,12 @@
 set -e
 
 TORCHCODEC_REPO="${TORCHCODEC_REPO:-https://github.com/pytorch/torchcodec.git}"
-# Pin to a specific release for reproducibility; update as needed.
-TORCHCODEC_BRANCH="${TORCHCODEC_BRANCH:-v0.10.0}"
+# v0.10.0, pinned to the immutable commit for reproducibility.
+TORCHCODEC_BRANCH="${TORCHCODEC_BRANCH:-0b261b98080925f2b709712a5491a1e8dd817065}"
 # Cache directory for pre-built wheels to avoid redundant recompilation.
 TORCHCODEC_WHEEL_CACHE="${TORCHCODEC_WHEEL_CACHE:-/root/.cache/torchcodec-wheels}"
 
 echo "=== TorchCodec Installation Script ==="
-
-# Check if torchcodec is already installed and working
-if python3 -c "from torchcodec.decoders import VideoDecoder" 2>/dev/null; then
-    echo "TorchCodec is already installed and working. Skipping."
-    exit 0
-fi
 
 # Try to install from cached wheel first
 ARCH_TAG="${PYTORCH_ROCM_ARCH:-all}"
@@ -30,7 +24,7 @@ CACHED_WHEEL="${TORCHCODEC_WHEEL_CACHE}/torchcodec-${TORCHCODEC_BRANCH}-${ARCH_T
 
 if [ -f "$CACHED_WHEEL" ]; then
     echo "Found cached wheel: $CACHED_WHEEL"
-    pip install "$CACHED_WHEEL" && {
+    pip install --no-deps "$CACHED_WHEEL" && {
         echo "Installed from cached wheel."
         echo "=== TorchCodec installation complete ==="
         exit 0
@@ -70,7 +64,7 @@ fi
 
 # Install Python build dependencies
 echo "Installing Python build dependencies..."
-pip install pybind11 setuptools wheel
+pip install pybind11==3.0.4 setuptools==79.0.1 wheel==0.48.0
 
 # Set pybind11 cmake path so CMake can find it
 export pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())")
@@ -95,8 +89,13 @@ trap cleanup EXIT
 
 # Clone and build
 cd "$BUILD_DIR"
-echo "Cloning TorchCodec from $TORCHCODEC_REPO (branch: $TORCHCODEC_BRANCH)..."
-git clone --depth 1 --branch "$TORCHCODEC_BRANCH" "$TORCHCODEC_REPO" torchcodec
+echo "Cloning TorchCodec from $TORCHCODEC_REPO (commit: $TORCHCODEC_BRANCH)..."
+printf '%s\n' "$TORCHCODEC_BRANCH" | grep -Eq '^[0-9a-f]{40}$'
+git init -q torchcodec
+git -C torchcodec remote add origin "$TORCHCODEC_REPO"
+git -C torchcodec fetch --depth 1 origin "$TORCHCODEC_BRANCH"
+git -C torchcodec checkout -q --detach FETCH_HEAD
+test "$(git -C torchcodec rev-parse HEAD)" = "$TORCHCODEC_BRANCH"
 
 cd torchcodec
 
@@ -124,7 +123,7 @@ if [ -z "$BUILT_WHEEL" ]; then
     exit 1
 fi
 
-pip install "$BUILT_WHEEL"
+pip install --no-deps "$BUILT_WHEEL"
 
 # Cache the wheel for future runs
 mkdir -p "$TORCHCODEC_WHEEL_CACHE"

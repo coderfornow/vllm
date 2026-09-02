@@ -236,9 +236,10 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
-  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - .dockerignore
+  - .pre-commit-config.yaml
   - .buildkite/scripts/docker-build-metadata-args.sh
   - .buildkite/scripts/ci-bake-rocm.sh
   - .buildkite/release-pipeline.yaml
@@ -249,9 +250,19 @@ steps:
   - docker/ci-rocm.hcl
   - docker/docker-bake.hcl
   - docker/docker-bake-rocm.hcl
+  - requirements/rocm.txt
+  - requirements/rocm-ci.txt
+  - requirements/common.txt
+  - requirements/rocm-lmcache.in
+  - requirements/rocm-lmcache.txt
+  - requirements/test/rocm.in
+  - requirements/test/rocm.txt
   - tests/tools/test_docker_build_metadata_args.py
+  - tests/tools/test_rocm_dependency_locking.py
+  - tools/lock_rocm_requirements.sh
   commands:
-  - pytest -v -s tools/test_docker_build_metadata_args.py
+  - cd .. && before=$$(sha256sum requirements/rocm-ci.txt requirements/rocm-lmcache.txt requirements/test/rocm.txt) && bash tools/lock_rocm_requirements.sh && test "$$before" = "$$(sha256sum requirements/rocm-ci.txt requirements/rocm-lmcache.txt requirements/test/rocm.txt)"
+  - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_dependency_locking.py
 
 #########################################################################################################################################
 #                                                                                                                                       #

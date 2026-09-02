@@ -1,26 +1,33 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete
-ARG TRITON_BRANCH="f0b55c0" # release/internal/3.7.x as of 08/18
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete@sha256:b64aecbed6cc2d8227407899831d5c53fa8450d4db08f6a2400c29587ce15be9
+ARG TRITON_BRANCH="f0b55c07da61c71775bef6d1a15ebf846430ac75" # release/internal/3.7.x as of 08/18
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
-ARG PYTORCH_BRANCH="6bbd260" # release/2.12 as of 08/02
+ARG PYTORCH_BRANCH="6bbd26020da1c6dc198625dfcdd968b1e4e6b1c5" # release/2.12 as of 08/02
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
-ARG PYTORCH_VISION_BRANCH="v0.27.1"
+ARG PYTORCH_VISION_BRANCH="df56172e4d5a8d0cd51384273bc6c5747f5ab931" # v0.27.1
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
-ARG PYTORCH_AUDIO_BRANCH="v2.11.0"
+ARG PYTORCH_AUDIO_BRANCH="34c52a67e8941bbd8e6adaca0eb0b9eabec11d78" # v2.11.0
 ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
-ARG FA_BRANCH="0e60e394"
+ARG FA_BRANCH="0e60e39473e8df549a20fb5353760f7a65b30e2d"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.19"
+ARG AITER_BRANCH="31350226161346314b3d8882c8085bd31dce6a34" # v0.1.19
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
-ARG MORI_BRANCH="v1.1.0"
+ARG MORI_BRANCH="c4d5877a50a20dea00b414c4422ebc240228684e" # v1.1.0
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG ROCPROFILER_SDK_REPO="https://github.com/ROCm/rocm-systems.git"
 ARG ROCPROFILER_SDK_COMMIT="2b22ab0195cc1461cd9abf3b969e9dd7c10af350"
 ARG ROCM_RUNTIME_REPO="https://github.com/mawong-amd/rocm-systems.git"
 ARG ROCM_RUNTIME_COMMIT="c7e40e16bca10311af72aee09cfa0cd1726f70a7"
+ARG GET_PIP_URL="https://raw.githubusercontent.com/pypa/get-pip/f6f644156f23dfe9acc06e7b9ca75eee311f2e37/public/get-pip.py"
+ARG GET_PIP_SHA256="fb24e693bab954209a063d90953621412ccad4a500905a726286e038f508ddf6"
+ARG PIP_VERSION="26.2.1"
+ARG UV_VERSION="0.12.1"
+ARG UV_DOWNLOAD_SHA256="90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb"
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
 ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_VERSION=v0.8.1
+ARG SCCACHE_DOWNLOAD_SHA256=e0ee621fb16b6940666cd770b091c62cadafd3e062dd12e3a49d9caaff3b795f
 ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
@@ -39,7 +46,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git cmake ninja-build g++ pkg-config \
        python3-pip libelf-dev libdrm-dev libnuma-dev libdw-dev xxd \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir CppHeaderParser
+RUN pip install --no-cache-dir CppHeaderParser==2.7.4 ply==3.11
 RUN git init -q /src && cd /src \
     && git remote add origin ${ROCM_RUNTIME_REPO} \
     && git config core.sparseCheckout true \
@@ -48,7 +55,8 @@ RUN git init -q /src && cd /src \
     && git sparse-checkout init --cone \
     && git sparse-checkout set projects/rocr-runtime projects/clr projects/hip shared cmake \
     && git fetch --filter=blob:none --depth 1 origin ${ROCM_RUNTIME_COMMIT} \
-    && git checkout -q FETCH_HEAD
+    && git checkout -q --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = "${ROCM_RUNTIME_COMMIT}"
 # ROCr's trap_handler and blit_shaders call find_package(Clang/LLVM REQUIRED) only to get
 # IMPORTED executables. The ROCm dev image ships the binaries but no CMake package config, so
 # supply one pointing at them.
@@ -116,6 +124,11 @@ ENV HSA_NO_SCRATCH_RECLAIM=1
 
 ARG PYTHON_VERSION=3.12
 ENV PYTHON_VERSION=${PYTHON_VERSION}
+ARG GET_PIP_URL
+ARG GET_PIP_SHA256
+ARG PIP_VERSION
+ARG UV_VERSION
+ARG UV_DOWNLOAD_SHA256
 
 RUN mkdir -p /app
 WORKDIR /app
@@ -134,15 +147,31 @@ RUN apt-get update -y \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && curl -fLsS --retry 3 --retry-delay 5 "${GET_PIP_URL}" -o /tmp/get-pip.py \
+    && printf '%s  %s\n' "${GET_PIP_SHA256}" /tmp/get-pip.py | sha256sum --check - \
+    && python${PYTHON_VERSION} /tmp/get-pip.py "pip==${PIP_VERSION}" \
+    && rm -f /tmp/get-pip.py \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' 'pybind11<3.1.0' Cython
+RUN curl -fLsS --retry 3 --retry-delay 5 \
+        "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" \
+        -o /tmp/uv.tar.gz \
+    && printf '%s  %s\n' "${UV_DOWNLOAD_SHA256}" /tmp/uv.tar.gz | sha256sum --check - \
+    && mkdir -p /tmp/uv \
+    && tar -xzf /tmp/uv.tar.gz -C /tmp/uv --strip-components=1 \
+    && install -m 0755 /tmp/uv/uv /tmp/uv/uvx /usr/local/bin/ \
+    && rm -rf /tmp/uv /tmp/uv.tar.gz \
+    && test "$(uv --version | awk '{print $2}')" = "${UV_VERSION}"
+
+RUN pip install packaging==26.3 cmake==3.31.10 ninja==1.13.2 \
+    wheel==0.48.0 setuptools==79.0.1 pybind11==3.0.4 Cython==3.3.0
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
 ARG USE_SCCACHE
 ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_VERSION
+ARG SCCACHE_DOWNLOAD_SHA256
 ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME
 ARG SCCACHE_REGION_NAME
@@ -150,9 +179,9 @@ ARG SCCACHE_S3_NO_CREDENTIALS
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
         && SCCACHE_ARCH="x86_64" \
-        && SCCACHE_VERSION="v0.8.1" \
         && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
-        && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+        && curl -fL --retry 3 --retry-delay 5 -o /tmp/sccache.tar.gz "${SCCACHE_DL_URL}" \
+        && printf '%s  %s\n' "${SCCACHE_DOWNLOAD_SHA256}" /tmp/sccache.tar.gz | sha256sum --check - \
         && tar -xzf /tmp/sccache.tar.gz -C /tmp \
         && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
         && chmod +x /usr/bin/sccache \
@@ -183,7 +212,6 @@ ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
-
 ###
 ### Triton Build
 ###
@@ -192,7 +220,8 @@ ARG TRITON_BRANCH
 ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
 RUN cd triton \
-    && git checkout ${TRITON_BRANCH} \
+    && git checkout --detach ${TRITON_BRANCH} \
+    && test "$(git rev-parse HEAD)" = "${TRITON_BRANCH}" \
     && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
     && if [ ! -f setup.py ]; then cd python; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
@@ -220,9 +249,12 @@ RUN apt-get update && apt-get install -y pkg-config liblzma-dev
 # torch 2.12 emits float->__bf16 libcalls (__truncsfbf2) absent from gcc-11 libgcc; build with gcc-13.
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13
 RUN git clone ${PYTORCH_REPO} pytorch
-RUN cd pytorch && git checkout ${PYTORCH_BRANCH}
 RUN cd pytorch \
-    && pip install -r requirements.txt && git submodule update --init --recursive
+    && git checkout --detach ${PYTORCH_BRANCH} \
+    && test "$(git rev-parse HEAD)" = "${PYTORCH_BRANCH}"
+RUN cd pytorch \
+    && pip install -r requirements.txt \
+    && git submodule update --init --recursive
 RUN cd pytorch && python3 tools/amd_build/build_amd.py \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
@@ -240,8 +272,9 @@ RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install
 ###
 FROM base AS build_pytorch_runtime
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install,ro \
-    pip install /install/*.whl
+RUN --mount=type=bind,source=requirements/rocm-ci.txt,target=/tmp/rocm-ci.txt,ro \
+    --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install,ro \
+    pip install --constraint /tmp/rocm-ci.txt /install/*.whl
 
 
 ###
@@ -253,7 +286,8 @@ ARG PYTORCH_VISION_REPO
 ARG USE_SCCACHE
 
 RUN git clone ${PYTORCH_VISION_REPO} vision
-RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
+RUN cd vision && git checkout --detach ${PYTORCH_VISION_BRANCH} \
+    && test "$(git rev-parse HEAD)" = "${PYTORCH_VISION_BRANCH}" \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && export CMAKE_C_COMPILER_LAUNCHER=sccache \
@@ -273,9 +307,11 @@ ARG PYTORCH_AUDIO_REPO
 ARG USE_SCCACHE
 
 RUN git clone ${PYTORCH_AUDIO_REPO} audio
-RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
+RUN cd audio && git checkout --detach ${PYTORCH_AUDIO_BRANCH} \
+    && test "$(git rev-parse HEAD)" = "${PYTORCH_AUDIO_BRANCH}" \
     && git submodule update --init --recursive
-RUN cd audio && pip install -r requirements.txt
+RUN --mount=type=bind,source=requirements/rocm-ci.txt,target=/tmp/rocm-ci.txt,ro \
+    cd audio && pip install --constraint /tmp/rocm-ci.txt -r requirements.txt
 RUN cd audio \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
@@ -293,11 +329,13 @@ RUN mkdir -p /app/install && cp /app/audio/dist/*.whl /app/install
 FROM base AS build_mori
 ARG MORI_BRANCH
 ARG MORI_REPO
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
+RUN --mount=type=bind,source=requirements/rocm-ci.txt,target=/tmp/rocm-ci.txt,ro \
+    --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    pip install --constraint /tmp/rocm-ci.txt /install/*.whl
 RUN git clone ${MORI_REPO}
 RUN cd mori \
-    && git checkout ${MORI_BRANCH} \
+    && git checkout --detach ${MORI_BRANCH} \
+    && test "$(git rev-parse HEAD)" = "${MORI_BRANCH}" \
     && git submodule update --init --recursive \
     && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
 RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
@@ -310,17 +348,21 @@ FROM base AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
 ARG USE_SCCACHE
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
+RUN --mount=type=bind,source=requirements/rocm-ci.txt,target=/tmp/rocm-ci.txt,ro \
+    --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    pip install --constraint /tmp/rocm-ci.txt /install/*.whl
 RUN git clone ${FA_REPO}
 RUN cd flash-attention \
-    && git checkout ${FA_BRANCH} \
+    && git checkout --detach ${FA_BRANCH} \
+    && test "$(git rev-parse HEAD)" = "${FA_BRANCH}" \
     && git submodule update --init \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && sccache --show-stats; \
        fi \
-    && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
+    && FLASH_ATTENTION_FORCE_BUILD=TRUE \
+       GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') \
+       python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
@@ -332,13 +374,16 @@ FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
 ARG USE_SCCACHE
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
-RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
+RUN --mount=type=bind,source=requirements/rocm-ci.txt,target=/tmp/rocm-ci.txt,ro \
+    --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    pip install --constraint /tmp/rocm-ci.txt /install/*.whl
+RUN git clone --no-checkout ${AITER_REPO} aiter
 RUN cd aiter \
+    && git checkout --detach ${AITER_BRANCH} \
+    && test "$(git rev-parse HEAD)" = "${AITER_BRANCH}" \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
-RUN pip install pyyaml && cd aiter \
+RUN cd aiter \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && sccache --show-stats; \
@@ -408,7 +453,8 @@ RUN git init -q /src && cd /src \
     && git sparse-checkout init --cone \
     && git sparse-checkout set projects/rocprofiler-sdk shared cmake \
     && git fetch --filter=blob:none --depth 1 origin ${ROCPROFILER_SDK_COMMIT} \
-    && git checkout -q FETCH_HEAD
+    && git checkout -q --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = "${ROCPROFILER_SDK_COMMIT}"
 RUN cd /src/projects/rocprofiler-sdk \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export CMAKE_C_COMPILER_LAUNCHER=sccache \
@@ -425,8 +471,12 @@ RUN cd /src/projects/rocprofiler-sdk \
     && cmake --install build --prefix /staging --strip
 
 FROM base AS final
+COPY requirements/rocm-ci.txt /tmp/rocm-ci.txt
+RUN uv pip install --system --no-deps -r /tmp/rocm-ci.txt \
+    && rm -f /tmp/rocm-ci.txt
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    pip install /install/*.whl
+    uv pip install --system --no-deps /install/*.whl \
+    && uv pip check --system
 
 COPY --from=build_rocprofiler_sdk /staging/ /opt/rocm/
 RUN ldconfig

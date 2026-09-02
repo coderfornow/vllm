@@ -1,4 +1,4 @@
--r ../common.txt
+-r ../rocm-lmcache.in
 
 # testing
 pytest
