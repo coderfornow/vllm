@@ -214,10 +214,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
     uv pip install "$(echo dist/*.whl)[tensorizer]"
 
-# Remove protobuf C++ extension that crashes on s390x
-RUN rm -rf /opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/google/_upb/*.so \
-           /opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/google/protobuf/pyext/*.so 2>/dev/null || true
-
 # setup non-root user for vllm
 RUN umask 002 && \
     /usr/sbin/useradd --uid 2000 --gid 0 vllm && \
